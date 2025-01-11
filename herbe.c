@@ -7,7 +7,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <fcntl.h>
-#include <semaphore.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 #include "config.h"
 
@@ -79,13 +80,23 @@ void expire(int sig)
 	XFlush(display);
 }
 
+void read_y_offset(unsigned int **offset, int *id) {
+    int shm_id = shmget(8432, sizeof(unsigned int), IPC_CREAT | 0660);
+    if (shm_id == -1) die("shmget failed");
+
+    *offset = (unsigned int *)shmat(shm_id, 0, 0);
+    if (*offset == (unsigned int *)-1) die("shmat failed\n");
+    *id = shm_id;
+}
+
+void free_y_offset(int id) {
+    shmctl(id, IPC_RMID, NULL);
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc == 1)
-	{
-		sem_unlink("/herbe");
-		die("Usage: %s body", argv[0]);
-	}
+        die("Usage: %s body", argv[0]);
 
 	struct sigaction act_expire, act_ignore;
 
@@ -129,6 +140,7 @@ int main(int argc, char *argv[])
 	if (!lines)
 		die("malloc failed");
 
+	XftFont *title_font = XftFontOpenName(display, screen, title_font_pattern);
 	XftFont *font = XftFontOpenName(display, screen, font_pattern);
 
 	for (int i = 1; i < argc; i++)
@@ -151,16 +163,23 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	unsigned int x = pos_x;
-	unsigned int y = pos_y;
+    int y_offset_id;
+    unsigned int *y_offset;
+    read_y_offset(&y_offset, &y_offset_id);
+
 	unsigned int text_height = font->ascent - font->descent;
-	unsigned int height = (num_of_lines - 1) * line_spacing + num_of_lines * text_height + 2 * padding;
+	unsigned int height = (num_of_lines - 1) * line_spacing + num_of_lines * text_height + 3 * padding;
+	unsigned int x = pos_x;
+	unsigned int y = pos_y + *y_offset;
+	unsigned int title_text_height = title_font->ascent - title_font->descent;
+
+    unsigned int used_y_offset = (*y_offset) += height + padding;
 
 	if (corner == TOP_RIGHT || corner == BOTTOM_RIGHT)
-		x = screen_width - width - border_size * 2 - pos_x;
+		x = screen_width - width - border_size * 2 - x;
 
 	if (corner == BOTTOM_LEFT || corner == BOTTOM_RIGHT)
-		y = screen_height - height - border_size * 2 - pos_y;
+		y = screen_height - height - border_size * 2 - y;
 
 	window = XCreateWindow(display, RootWindow(display, screen), x, y, width, height, border_size, DefaultDepth(display, screen),
 						   CopyFromParent, visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel, &attributes);
@@ -168,11 +187,11 @@ int main(int argc, char *argv[])
 	XftDraw *draw = XftDrawCreate(display, window, visual, colormap);
 	XftColorAllocName(display, visual, colormap, font_color, &color);
 
+	XClassHint classhint = { "herbe", "herbe" };
+	XSetClassHint(display, window, &classhint);
+
 	XSelectInput(display, window, ExposureMask | ButtonPress);
 	XMapWindow(display, window);
-
-	sem_t *mutex = sem_open("/herbe", O_CREAT, 0644, 1);
-	sem_wait(mutex);
 
 	sigaction(SIGUSR1, &act_expire, 0);
 	sigaction(SIGUSR2, &act_expire, 0);
@@ -188,9 +207,15 @@ int main(int argc, char *argv[])
 		if (event.type == Expose)
 		{
 			XClearWindow(display, window);
-			for (int i = 0; i < num_of_lines; i++)
-				XftDrawStringUtf8(draw, &color, font, padding, line_spacing * i + text_height * (i + 1) + padding,
-								  (FcChar8 *)lines[i], strlen(lines[i]));
+			for (int i = 0; i < num_of_lines; i++) {
+				if (!i) {
+					XftDrawStringUtf8(draw, &color, title_font, padding, line_spacing * i + title_text_height * (i + 1) + padding,
+									(FcChar8 *)lines[i], strlen(lines[i]));
+					continue;
+				}
+				XftDrawStringUtf8(draw, &color, font, padding, line_spacing * i+1 + text_height * (i + 2) + padding,
+								(FcChar8 *)lines[i], strlen(lines[i]));
+			}
 		}
 		else if (event.type == ButtonPress)
 		{
@@ -204,12 +229,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	sem_post(mutex);
-	sem_close(mutex);
 
 	for (int i = 0; i < num_of_lines; i++)
 		free(lines[i]);
 
+    if (used_y_offset == *y_offset) free_y_offset(y_offset_id);
 	free(lines);
 	XftDrawDestroy(draw);
 	XftColorFree(display, visual, colormap, &color);

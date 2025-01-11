@@ -1,0 +1,3 @@
+https://github.com/dudik/herbe/issues/48 - Allows for a notification title
+https://github.com/dudik/herbe/pull/45 - Allows the compositor to identify herbe using WM_CLASS
+https://github.com/dudik/herbe/pull/19 - Allows notifications to stack
